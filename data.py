@@ -15,20 +15,21 @@ class FoodImageCaptionDataset(Dataset):
         self.image_dir = image_dir
         self.transform = transform
 
+        self.data['Image_Path'] = self.data['Image_Name'].apply(lambda x: os.path.join(self.image_dir, f"{x}.jpg"))
+        self.data = self.data[self.data['Image_Path'].apply(os.path.exists)].reset_index(drop=True)
+
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        img_name = self.data.iloc[idx]['Image_Name']
+        # Obtener el nombre de la imagen y la descripción (caption)
+        img_path = self.data.iloc[idx]['Image_Path']
         caption = self.data.iloc[idx]['Title']
         
-        img_path = os.path.join(self.image_dir, f"{img_name}.jpg")
+        # Cargar la imagen
+        image = Image.open(img_path).convert("RGB")
         
-        try:
-            image = Image.open(img_path).convert("RGB")
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Image {img_path} not found.")
-        
+        # Aplicar transformaciones, si existen
         if self.transform:
             image = self.transform(image)
         
