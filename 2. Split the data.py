@@ -73,11 +73,11 @@ image_transforms = transforms.Compose([
 
 # Create DataLoaders
 batch_size = 32
-train_dataset = FoodDataset(train_df, transform=image_transforms, level='word')  # or level='char'
-val_dataset = FoodDataset(val_df, transform=image_transforms, level='word')
-test_dataset = FoodDataset(test_df, transform=image_transforms, level='word')
+train_dataset = FoodDataset(train_df, transform=image_transforms, level='char') #we chose char level
+val_dataset = FoodDataset(val_df, transform=image_transforms, level='char')
+test_dataset = FoodDataset(test_df, transform=image_transforms, level='char')
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True) #ns si shuffle = true o = false
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
