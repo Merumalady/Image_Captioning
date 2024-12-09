@@ -12,8 +12,7 @@ from nltk.tokenize import word_tokenize
 import spacy
 import re
 from collections import defaultdict
-
-
+from torch.nn.utils.rnn import pad_sequence
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
@@ -46,21 +45,32 @@ class FoodImageCaptionDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        # Procesar imagen
+    # Procesar imagen
         img_path = self.data.iloc[idx]['Image_Path']
         image = Image.open(img_path).convert("RGB")
         if self.transform:
             image = self.transform(image)
         
-
         # Procesar texto
         caption = self.data.iloc[idx]['Title']
-        return image, caption
+        tokens = custom_standardization(caption)
+        encoded_caption = self.vocab.encode(tokens, self.max_seq_length)
+
+        return image, torch.tensor(encoded_caption, dtype=torch.long)
 
 #image_dir = r"C:\Users\merit\OneDrive\Escritorio\Image_Captioning\archive\Food Images\Food Images"
 #dataset = FoodImageCaptionDataset(csv_path=r"C:\Users\merit\OneDrive\Escritorio\Image_Captioning\archive\Food Ingredients and Recipe Dataset with Image Name Mapping.csv", image_dir=image_dir)
 #image_dir = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\archive\Food Images\Food Images"
 #dataset = FoodImageCaptionDataset(csv_path=r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\archive\Food Ingredients and Recipe Dataset with Image Name Mapping.csv", image_dir=image_dir)
+
+def collate_fn(batch):
+    images, captions = zip(*batch)
+    images = torch.stack(images)
+    captions = [torch.tensor(caption, dtype=torch.long) for caption in captions]
+    captions = pad_sequence(captions, batch_first=True, padding_value=0)
+    return images, captions
+
+
 
 def train_val_split(data, validation_size=0.2, test_size=0.02):
     """
@@ -81,7 +91,7 @@ def train_val_split(data, validation_size=0.2, test_size=0.02):
 
     return train_data, validation_data, test_data
 
-nltk.download('punkt')
+#nltk.download('punkt')
 nlp = spacy.load("en_core_web_sm")
 
 def custom_standardization(input_string):
@@ -101,11 +111,6 @@ def custom_standardization(input_string):
     
     # Tokenizar con NLTK
     tokens = word_tokenize(input_string)
-    
-    # (Opcional) Procesar con spaCy: Lematización y eliminación de stopwords
-    doc = nlp(" ".join(tokens))
-    tokens = [token.lemma_ for token in doc if not token.is_stop]
-    
     return tokens
 
 class Vocabulary:
@@ -162,15 +167,9 @@ image_dir = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Ter
 dataset = FoodImageCaptionDataset(csv_path=csv_path, image_dir=image_dir, transform=image_transforms)
 
 # Dividir datos en entrenamiento, validación y pruebas
-train_data, val_data, test_data = train_val_split(dataset, validation_size=0.2, test_size=0.02)
+train_data, val_data, test_data = train_val_split(dataset, validation_size=0.1, test_size=0.1)
 
 # Crear dataloaders
-train_loader = DataLoader(train_data, batch_size=16, shuffle=True, num_workers=4)
-val_loader = DataLoader(val_data, batch_size=16, shuffle=False, num_workers=4)
-test_loader = DataLoader(test_data, batch_size=16, shuffle=False, num_workers=4)
-
-# Spliting the dataset
-print(f"Total number of samples: {len(dataset)}")
-print(f"----> Number of training samples: {len(train_data)}")
-print(f"----> Number of validation samples: {len(val_data)}")
-print(f"----> Number of test samples: {len(test_data)}")
+train_loader = DataLoader(train_data, batch_size=8, shuffle=True, num_workers=1, collate_fn=collate_fn)
+val_loader = DataLoader(val_data, batch_size=8, shuffle=False, num_workers=1, collate_fn=collate_fn)
+test_loader = DataLoader(test_data, batch_size=8, shuffle=False, num_workers=1, collate_fn=collate_fn)
