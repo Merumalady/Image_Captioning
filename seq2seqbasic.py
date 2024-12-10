@@ -22,7 +22,7 @@ class Tee:
         for fileobj in self.fileobjs:
             fileobj.flush()
 
-log_file = open(r'Image_Captioning\modelsCNNRNN.txt', 'w')  
+log_file = open(r'/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/modelsCNNRNN.txt', 'w')  
 sys.stdout = Tee(sys.stdout, log_file) 
 
 bleu = evaluate.load('bleu')
@@ -214,7 +214,7 @@ def train_model(model, name, train_loader, val_loader, vocab, num_epochs=20, lea
 
 # Función para guardar el vocabulario
 def save_vocab(vocab, name):
-    filename = "Image_Captioning/" + name + "_vocab.pkl"
+    filename = "/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/" + name + "_vocab.pkl"
     with open(filename, "wb") as f:
         pickle.dump(vocab, f)
     print(f"Vocabulary saved at {filename}")
@@ -228,7 +228,7 @@ def save_model(model, name ,optimizer, epoch, loss, vocab):
         "loss": loss,
     }
     
-    filename = "Image_Captioning/" + name + "_model.pth"
+    filename = "/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/" + name + "_model.pth"
     torch.save(checkpoint, filename)
     print(f"Final model saved at {filename}")
     

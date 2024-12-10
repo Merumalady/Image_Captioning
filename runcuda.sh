@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -n 4
 #SBATCH -N 1
-#SBATCH -D /export/fhome/vlia04/MyVirtualEnv
+#SBATCH -D /export/fhome/vlia04/MyVirtualEnv/Image_Captioning/
 #SBATCH -t 4-00:05           # Tiempo máximo de ejecución en formato correcto
 #SBATCH -p tfg               # Partición
 #SBATCH --mem 12288          # Memoria en MB (12GB)

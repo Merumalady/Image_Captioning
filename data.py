@@ -161,8 +161,8 @@ image_transforms = transforms.Compose([
 ])
 
 # Crear el dataset
-csv_path = r"Image_Captioning\archive\Food Ingredients and Recipe Dataset with Image Name Mapping.csv"
-image_dir = r"Image_Captioning\archive\Food Images\Food Images"
+csv_path = r"/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/Image_Captioning/archive/Food Ingredients and Recipe Dataset with Image Name Mapping.csv"
+image_dir = r"/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/Image_Captioning/archive/Food Images/Food Images"
 
 dataset = FoodImageCaptionDataset(csv_path=csv_path, image_dir=image_dir, transform=image_transforms)
 
