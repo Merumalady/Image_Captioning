@@ -7,6 +7,23 @@ from tqdm import tqdm
 from nltk.translate.bleu_score import sentence_bleu
 import evaluate
 import pickle
+import sys
+
+class Tee:
+    def __init__(self, *fileobjs):
+        self.fileobjs = fileobjs
+
+    def write(self, message):
+        for fileobj in self.fileobjs:
+            fileobj.write(message)
+            fileobj.flush()  
+
+    def flush(self):
+        for fileobj in self.fileobjs:
+            fileobj.flush()
+
+log_file = open(r'/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/modelsCNNRNN.txt', 'w')  
+sys.stdout = Tee(sys.stdout, log_file) 
 
 bleu = evaluate.load('bleu')
 meteor = evaluate.load('meteor')
@@ -197,7 +214,7 @@ def train_model(model, name, train_loader, val_loader, vocab, num_epochs=20, lea
 
 # Función para guardar el vocabulario
 def save_vocab(vocab, name):
-    filename = "Challenge 3/Image_Captioning/" + name + "_vocab.pkl"
+    filename = "/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/" + name + "_vocab.pkl"
     with open(filename, "wb") as f:
         pickle.dump(vocab, f)
     print(f"Vocabulary saved at {filename}")
@@ -211,7 +228,7 @@ def save_model(model, name ,optimizer, epoch, loss, vocab):
         "loss": loss,
     }
     
-    filename = "Challenge 3/Image_Captioning/" + name + "_model.pth"
+    filename = "/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/" + name + "_model.pth"
     torch.save(checkpoint, filename)
     print(f"Final model saved at {filename}")
     
@@ -240,5 +257,8 @@ if __name__ == "__main__":
 
         train_model(
             model, name, d.train_loader, d.val_loader, d.dataset.vocab, 
-            num_epochs=15, learning_rate=1e-4, optimizer_type="adam"
+            num_epochs=50, learning_rate=1e-3, optimizer_type="adam"
         )
+
+
+log_file.close()
