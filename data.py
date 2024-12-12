@@ -91,7 +91,7 @@ def train_val_split(data, validation_size=0.2, test_size=0.02):
 
     return train_data, validation_data, test_data
 
-#nltk.download('punkt')
+nltk.download('punkt', quiet= True)
 nlp = spacy.load("en_core_web_sm")
 
 def custom_standardization(input_string):
@@ -161,8 +161,8 @@ image_transforms = transforms.Compose([
 ])
 
 # Crear el dataset
-csv_path = r"/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/Image_Captioning/archive/Food Ingredients and Recipe Dataset with Image Name Mapping.csv"
-image_dir = r"/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/Image_Captioning/archive/Food Images/Food Images"
+csv_path = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\archive\Food Ingredients and Recipe Dataset with Image Name Mapping.csv"
+image_dir = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\archive/Food Images/Food Images"
 
 dataset = FoodImageCaptionDataset(csv_path=csv_path, image_dir=image_dir, transform=image_transforms)
 

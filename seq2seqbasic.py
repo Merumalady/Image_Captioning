@@ -7,23 +7,6 @@ from tqdm import tqdm
 from nltk.translate.bleu_score import sentence_bleu
 import evaluate
 import pickle
-import sys
-
-class Tee:
-    def __init__(self, *fileobjs):
-        self.fileobjs = fileobjs
-
-    def write(self, message):
-        for fileobj in self.fileobjs:
-            fileobj.write(message)
-            fileobj.flush()  
-
-    def flush(self):
-        for fileobj in self.fileobjs:
-            fileobj.flush()
-
-log_file = open(r'/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/modelsCNNRNN.txt', 'w')  
-sys.stdout = Tee(sys.stdout, log_file) 
 
 bleu = evaluate.load('bleu')
 meteor = evaluate.load('meteor')
@@ -119,6 +102,41 @@ class ImageCaptioningModel(nn.Module):
         outputs = self.decoder(features, captions)
         return outputs
     
+    def generate_caption(self, image, vocab, max_len=20):
+        self.eval()  # Set model to evaluation mode
+        with torch.no_grad():
+            features = self.encoder(image)  # Extract features
+            inputs = features.unsqueeze(0)  # Add batch dimension
+
+            # Initialize hidden state (GRU needs a hidden state)
+            hidden = torch.zeros(1, 1, self.decoder.rnn.hidden_size).to(image.device)
+
+            # Start the caption with the <START> token
+            predicted_caption = []
+            for _ in range(max_len):
+                # Pass the current input and hidden state to the GRU
+                out, hidden = self.decoder.rnn(inputs, hidden)
+
+                # Get the predicted word (take argmax over the output)
+                output = self.decoder.fc(out.squeeze(1))
+                predicted_idx = output.argmax(1).item()
+
+                predicted_caption.append(predicted_idx)
+
+                # If we hit the end token, stop generating
+                if predicted_idx == vocab.word2idx["<END>"]:
+                    break
+
+                # Prepare the next input: embed the predicted token
+                inputs = self.decoder.embed(predicted_idx).unsqueeze(1)
+                inputs = self.decoder.feature_fc(inputs)  # Ensure the shape matches GRU input
+
+        # Decode the word indices to get the caption as a string
+        caption = vocab.decode(predicted_caption)
+        return " ".join([word for word in caption if word not in ["<START>", "<END>", "<PAD>"]])
+
+
+    
 
 def evaluate_model(model, data_loader, vocab):
     model.eval()
@@ -182,7 +200,7 @@ def evaluate_model(model, data_loader, vocab):
 
 
 # Función de entrenamiento
-def train_model(model, name, train_loader, val_loader, vocab, num_epochs=20, learning_rate=1e-3, optimizer_type="adam"):
+def train_model(model, name, train_loader, val_loader, vocab, device ,num_epochs=20, learning_rate=1e-3, optimizer_type="adam"):
     criterion = CrossEntropyLoss(ignore_index=vocab.word2idx["<PAD>"])
     optimizers = {
         "adam": optim.Adam,
@@ -210,29 +228,12 @@ def train_model(model, name, train_loader, val_loader, vocab, num_epochs=20, lea
         # Evaluación después de cada época
         evaluate_model(model, val_loader, vocab)
 
-    save_model(model, name ,optimizer, epoch + 1, avg_loss, vocab)
-
 # Función para guardar el vocabulario
 def save_vocab(vocab, name):
-    filename = "/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/" + name + "_vocab.pkl"
+    filename = f"Challenge 3\Image_Captioning\{name}_vocab.pkl"
     with open(filename, "wb") as f:
         pickle.dump(vocab, f)
     print(f"Vocabulary saved at {filename}")
-
-# Función para guardar el modelo al final del entrenamiento
-def save_model(model, name ,optimizer, epoch, loss, vocab):
-    checkpoint = {
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "loss": loss,
-    }
-    
-    filename = "/export/fhome/vlia04/MyVirtualEnv/Image_Captioning/" + name + "_model.pth"
-    torch.save(checkpoint, filename)
-    print(f"Final model saved at {filename}")
-    
-    save_vocab(vocab, name)
 
 if __name__ == "__main__":
     import data as d
@@ -240,7 +241,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     embed_size = 256
     hidden_size = 512
-    num_layers = 1
+    num_layers = 2
     vocab_size = len(d.dataset.vocab.word2idx)
 
     # Definición de combinaciones de modelos
@@ -256,9 +257,9 @@ if __name__ == "__main__":
         ).to(device)
 
         train_model(
-            model, name, d.train_loader, d.val_loader, d.dataset.vocab, 
-            num_epochs=50, learning_rate=1e-3, optimizer_type="adam"
+            model, name, d.train_loader, d.val_loader, d.dataset.vocab, device, 
+            num_epochs=20, learning_rate=1e-3, optimizer_type="adamw"
         )
 
-
-log_file.close()
+        torch.save(model.state_dict(), f"Challenge 3\Image_Captioning\{name}_model.pth")
+        save_vocab(d.dataset.vocab, name)
