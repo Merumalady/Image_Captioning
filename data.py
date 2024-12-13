@@ -45,6 +45,8 @@ class FoodImageCaptionDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
+        print(f"Processing item {idx}/{len(self.data)}: {img_path}")
+
     # Procesar imagen
         img_path = self.data.iloc[idx]['Image_Path']
         image = Image.open(img_path).convert("RGB")
