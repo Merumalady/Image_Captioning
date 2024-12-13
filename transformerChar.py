@@ -4,7 +4,8 @@ import torch.optim as optim
 from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 import os
-from nltk.translate.bleu_score import sentence_bleu
+import matplotlib.pyplot as plt
+#from nltk.translate.bleu_score import sentence_bleu
 import evaluate
 
 # Load evaluation metrics
@@ -16,8 +17,6 @@ rouge = evaluate.load('rouge')
 class PositionalEmbedding(nn.Module):
     def __init__(self, sequence_length, embed_dim):
         super(PositionalEmbedding, self).__init__()
-        self.embed_dim = embed_dim
-        self.sequence_length = sequence_length
         self.positional_embeddings = nn.Parameter(torch.zeros(sequence_length, embed_dim))
 
     def forward(self, x):
@@ -53,198 +52,105 @@ class TransformerDecoder(nn.Module):
         ])
         self.fc_out = nn.Linear(embed_dim, vocab_size)
         self.norm = nn.LayerNorm(embed_dim)
-        self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None):
-        tgt_embedded = self.embedding(tgt)
-        tgt_embedded = self.positional_embedding(tgt_embedded)
+    def forward(self, inputs, targets, tgt_mask=None, memory_mask=None):
+        # Asegurarse de que los índices sean de tipo LongTensor
+        inputs = inputs.long()
+        targets = targets.long()
 
-        for layer in self.layers:
-            tgt_embedded = layer(tgt_embedded, memory, tgt_mask=tgt_mask, memory_key_padding_mask=memory_mask)
+        input_embedded = self.embedding(inputs)
+        input_embedded = self.positional_embedding(input_embedded)
+        memory = self.encoder(input_embedded)
+        outputs = self.decoder(targets, memory, tgt_mask=tgt_mask, memory_mask=memory_mask)
+        return outputs
 
-        logits = self.fc_out(self.norm(tgt_embedded))
-        return self.softmax(logits)
 
-# Transformer-based Character-level Model
+# Transformer Model
 class TransformerCharacterLevel(nn.Module):
     def __init__(self, embed_dim, num_heads, dense_dim, vocab_size, num_layers=2, max_seq_len=50):
         super(TransformerCharacterLevel, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.positional_embedding = PositionalEmbedding(sequence_length=max_seq_len, embed_dim=embed_dim)
-        self.encoder = TransformerEncoder(embed_dim=embed_dim, num_heads=num_heads, dense_dim=dense_dim, num_layers=num_layers)
-        self.decoder = TransformerDecoder(embed_dim=embed_dim, num_heads=num_heads, dense_dim=dense_dim, vocab_size=vocab_size, num_layers=num_layers, max_seq_len=max_seq_len)
+        self.encoder = TransformerEncoder(embed_dim, num_heads, dense_dim, num_layers)
+        self.decoder = TransformerDecoder(embed_dim, num_heads, dense_dim, vocab_size, num_layers, max_seq_len)
 
     def forward(self, inputs, targets, tgt_mask=None, memory_mask=None):
         input_embedded = self.embedding(inputs)
         input_embedded = self.positional_embedding(input_embedded)
-
         memory = self.encoder(input_embedded)
         outputs = self.decoder(targets, memory, tgt_mask=tgt_mask, memory_mask=memory_mask)
         return outputs
 
-    def generate(self, inputs, max_len=20, start_idx=2, end_idx=3):
-        input_embedded = self.embedding(inputs)
-        input_embedded = self.positional_embedding(input_embedded)
-
-        memory = self.encoder(input_embedded)
-
-        outputs = []
-        tgt = torch.tensor([[start_idx]], device=inputs.device)
-
-        for _ in range(max_len):
-            preds = self.decoder(tgt, memory)
-            next_char = preds[:, -1, :].argmax(dim=-1).item()
-            outputs.append(next_char)
-            if next_char == end_idx:
-                break
-            tgt = torch.cat([tgt, torch.tensor([[next_char]], device=inputs.device)], dim=1)
-
-        return outputs
-
-# Evaluation and Training Functions
-
-def evaluate_model(model, data_loader, vocab):
-    model.eval()
-    total_bleu1 = total_bleu2 = total_rouge = total_meteor = 0
-    count = 0
-
-    with torch.no_grad():
-        for inputs, targets in data_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = [model.generate(input.unsqueeze(0), max_len=20, start_idx=vocab.word2idx["<START>"], end_idx=vocab.word2idx["<END>"])
-                       for input in inputs]
-            predicted = [vocab.decode(output) for output in outputs]
-
-            predicted = [
-                " ".join([char for char in caption if char not in ["<START>", "<END>", "<PAD>"]])
-                for caption in predicted
-            ]
-
-            references = [vocab.decode(target.tolist()) for target in targets]
-            references = [
-                " ".join([char for char in ref if char not in ["<START>", "<END>", "<PAD>"]])
-                for ref in references
-            ]
-
-            bleu1 = bleu.compute(predictions=predicted, references=references, max_order=1)
-            bleu2 = bleu.compute(predictions=predicted, references=references, max_order=2)
-            total_bleu1 += bleu1["bleu"]
-            total_bleu2 += bleu2["bleu"]
-
-            res_r = rouge.compute(predictions=predicted, references=references)
-            total_rouge += res_r['rougeL']
-
-            res_m = meteor.compute(predictions=predicted, references=references)
-            total_meteor += res_m['meteor']
-
-            count += 1
-
-    avg_bleu1 = total_bleu1 / count
-    avg_bleu2 = total_bleu2 / count
-    avg_rouge = total_rouge / count
-    avg_meteor = total_meteor / count
-
-    print(f"Average BLEU1 Score: {avg_bleu1*100:.4f}%")
-    print(f"Average BLEU2 Score: {avg_bleu2*100:.4f}%")
-    print(f"Average ROUGE-L Score: {avg_rouge*100:.4f}%")
-    print(f"Average METEOR Score: {avg_meteor*100:.4f}%")
-
-def train_model(model, name, train_loader, val_loader, vocab, num_epochs=20, learning_rate=1e-3, optimizer_type="adam"):
-    criterion = CrossEntropyLoss(ignore_index=vocab.word2idx["<PAD>"])
-    optimizers = {
-        "adam": optim.Adam,
-        "adamw": optim.AdamW,
-        "sgd": optim.SGD
-    }
-    optimizer = optimizers[optimizer_type](model.parameters(), lr=learning_rate)
+# Training and Evaluation Functions
+def train_model(model, name, train_loader, val_loader, vocab, num_epochs=20, learning_rate=1e-3):
+    criterion = CrossEntropyLoss(ignore_index=vocab.char2idx['<PAD>'])
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    train_losses = []
+    val_losses = []
 
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
-
-        for inputs, targets in tqdm(train_loader):
+        for inputs, targets in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
             inputs, targets = inputs.to(device), targets.to(device)
 
-            outputs = model(inputs, targets)
-            loss = criterion(outputs.view(-1, vocab_size), targets.view(-1))
-
+            outputs = model(inputs, targets[:, :-1])
+            loss = criterion(outputs.view(-1, len(vocab.char2idx)), targets[:, 1:].contiguous().view(-1))
+            
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
             total_loss += loss.item()
 
-        avg_loss = total_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
-        evaluate_model(model, val_loader, vocab)
+        avg_train_loss = total_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
 
-        save_model(
-            model=model,
-            optimizer=optimizer,
-            vocab=vocab,
-            loss=avg_loss,
-            name=name,
-            save_dir=r"C:/Users/merit/OneDrive/Escritorio/Image_Captioning/"
-        )
+        val_loss = evaluate_model(model, val_loader, vocab, criterion)
+        val_losses.append(val_loss)
+        
+        print(f"Epoch [{epoch+1}/{num_epochs}] | Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        save_model(model, r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\{name}_epoch_{epoch+1}.pth")
 
-def save_model(model, optimizer, vocab, loss, name, save_dir="./checkpoints/"):
-    """
-    Saves the trained model, optimizer state, and vocabulary as a whole.
+    plot_training(train_losses, val_losses, r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\{name}_training_plot.png")
 
-    Args:
-        model (nn.Module): The trained model to save.
-        optimizer (torch.optim.Optimizer): The optimizer used during training.
-        vocab (object): The vocabulary object to save.
-        loss (float): The final loss value.
-        name (str): A base name for the saved files.
-        save_dir (str): Directory where the model and vocab will be saved. Defaults to './checkpoints/'.
-    """
-    # Ensure the save directory exists
-    os.makedirs(save_dir, exist_ok=True)
+def evaluate_model(model, data_loader, vocab, criterion):
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for inputs, targets in data_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs, targets[:, :-1])
+            loss = criterion(outputs.view(-1, len(vocab.char2idx)), targets[:, 1:].contiguous().view(-1))
+            total_loss += loss.item()
+    return total_loss / len(data_loader)
 
-    # Save the entire model checkpoint (model + optimizer state)
-    model_filename = os.path.join(save_dir, f"{name}_model.pth")
-    checkpoint = {
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "loss": loss,
-        "vocab": vocab
-    }
-    torch.save(checkpoint, model_filename)
-    print(f"Model and optimizer checkpoint saved at {model_filename}")
+def save_model(model, path):
+    torch.save(model.state_dict(), path)
+    print(f"Model saved to {path}")
+
+def plot_training(train_losses, val_losses, save_path):
+    plt.figure(figsize=(8, 6))
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.savefig(save_path)
+    print(f"Training plot saved to {save_path}")
 
 if __name__ == "__main__":
-    import data as d  # Assuming data.py contains your dataset and vocab loaders
-
-    # Define device for model training
+    import datachar as d
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Define model parameters
     embed_size = 256
     num_heads = 8
     dense_dim = 512
     num_layers = 6
     max_seq_len = 50
-    vocab_size = len(d.dataset.vocab.word2idx)
+    vocab_size = len(d.train_dataset.vocab.char2idx)
 
-    # Initialize the model
     model = TransformerCharacterLevel(
-        embed_dim=embed_size,
-        num_heads=num_heads,
-        dense_dim=dense_dim,
-        vocab_size=vocab_size,
-        num_layers=num_layers,
-        max_seq_len=max_seq_len
+        embed_dim=embed_size, num_heads=num_heads, dense_dim=dense_dim, vocab_size=vocab_size, num_layers=num_layers, max_seq_len=max_seq_len
     ).to(device)
 
-    # Train the model
-    train_model(
-        model=model,
-        name="transformer_captioning",
-        train_loader=d.train_loader,
-        val_loader=d.val_loader,
-        vocab=d.dataset.vocab,
-        num_epochs=15,
-        learning_rate=1e-4,
-        optimizer_type="adam"
-    )
+    train_model(model, "transformer_captioning", d.train_loader, d.val_loader, d.train_dataset.vocab, num_epochs=15, learning_rate=1e-4)
