@@ -13,7 +13,7 @@ from nltk.translate.meteor_score import meteor_score
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import evaluate
-
+from seq2seqbasic import ImageCaptioningModel, EncoderCNN
 
 bleu = evaluate.load('bleu')
 meteor = evaluate.load('meteor')
@@ -29,44 +29,17 @@ def load_vocab(filename="vocab.pkl"):
     print(f"Vocabulary loaded from {filename}")
     return vocab
 
-# Modelo Encoder-Decoder (como el tuyo, puedes personalizarlo)
-class EncoderDecoderModel(nn.Module):
-    def __init__(self, embed_size, hidden_size, vocab_size):
-        super(EncoderDecoderModel, self).__init__()
-        self.resnet = torchvision.models.resnet18(pretrained=True)
-        self.resnet.fc = nn.Linear(self.resnet.fc.in_features, embed_size)
-        
-        self.decoder = nn.GRU(embed_size, hidden_size, batch_first=True)
-        self.fc_out = nn.Linear(hidden_size, vocab_size)
-        
-    def forward(self, images, captions):
-        features = self.resnet(images)
-        output, hidden = self.decoder(features.unsqueeze(1))
-        out = self.fc_out(output.squeeze(1))
-        return out
-
-    def generate_caption(self, image, vocab, max_len=20):
-        features = self.resnet(image)
-        hidden = None
-        captions = []
-        
-        for _ in range(max_len):
-            output, hidden = self.decoder(features.unsqueeze(1), hidden)
-            predicted_word_idx = output.argmax(2)
-            word = vocab.idx2word[predicted_word_idx.item()]
-            captions.append(word)
-            if word == '<END>':
-                break
-        
-        return ' '.join(captions)
-
 # Cargar el modelo
-def load_model(filename, model, optimizer=None):
-    checkpoint = torch.load(filename)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    if optimizer:
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    print(f"Model loaded from {filename}")
+def load_model(model_path, cnn_type, rnn_type, embed_size, hidden_size, vocab_size, num_layers, device):
+    # Inicializar el modelo con la arquitectura correcta
+    model = ImageCaptioningModel(
+        embed_size, hidden_size, vocab_size, cnn_type=cnn_type, rnn_type=rnn_type, num_layers=num_layers
+    )
+    # Cargar los pesos
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+    return model
 
 # Cargar la imagen
 def load_image(image_path, transform=None):
@@ -152,16 +125,29 @@ def test_random_image(model, vocab, image_dir="path_to_images"):
 
 # Entrenamiento y evaluación (configuración del modelo y vocabulario)
 def main():
-    # Cargar vocabulario y modelo
-    vocab = load_vocab(r"Challenge 3\Image_Captioning\RESNET18_LSTM_vocab.pkl")
-    model = EncoderDecoderModel(embed_size=256, hidden_size=512, vocab_size=len(d.dataset.vocab.word2idx)).to(device)
-    load_model(r"Challenge 3\Image_Captioning\RESNET18_LSTM_model.pth", model)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    embed_size = 256
+    hidden_size = 512
+    num_layers = 1
+    vocab_size = len(d.dataset.vocab.word2idx)
 
-    # Evaluar el modelo
-    bleu, rouge, meteor = evaluate_model(model, d.test_loader, vocab)
+    # Ruta del modelo a cargar
+    cnn_type = "resnet18"
+    rnn_type = "gru"
+    model_name = f"{cnn_type.upper()}_{rnn_type.upper()}"
+    model_path = f"Challenge 3\Image_Captioning\{model_name}_model.pth"
+
+    # Cargar modelo
+    model = load_model(
+        model_path, cnn_type, rnn_type, embed_size, hidden_size, vocab_size, num_layers, device
+    )
+
+    evaluate_model(model, d.test_loader, d.dataset.vocab, device)
 
     # Evaluar el modelo con una imagen aleatoria
     #test_random_image(model, vocab, "path_to_images")
 
+
 if __name__ == "__main__":
     main()
+
