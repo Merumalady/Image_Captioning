@@ -1,156 +1,284 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.nn import CrossEntropyLoss
-from tqdm import tqdm
+from torch.nn import Dropout
 import os
-import matplotlib.pyplot as plt
-#from nltk.translate.bleu_score import sentence_bleu
-import evaluate
+from sklearn.model_selection import train_test_split
+from efficientnet_pytorch import EfficientNet
+from keras.callbacks import EarlyStopping
+from tensorflow.keras.optimizers import Adam
+import datachar as d
 
-# Load evaluation metrics
-bleu = evaluate.load('bleu')
-meteor = evaluate.load('meteor')
-rouge = evaluate.load('rouge')
+# Set cache directory explicitly
+cache_dir = os.path.join(os.path.expanduser("~"), "OneDrive", ".cache", "torch")
+os.environ['TORCH_HOME'] = cache_dir
 
-# Positional Embedding for Transformer
-class PositionalEmbedding(nn.Module):
-    def __init__(self, sequence_length, embed_dim):
-        super(PositionalEmbedding, self).__init__()
-        self.positional_embeddings = nn.Parameter(torch.zeros(sequence_length, embed_dim))
+# Create cache directory if it doesn't exist
+os.makedirs(cache_dir, exist_ok=True)
+
+# Definir el modelo CNN basado en EfficientNet
+def get_cnn_model():
+    # Cargar EfficientNetB0 preentrenado
+    base_model = EfficientNet.from_pretrained('efficientnet-b0')
+    
+    # Eliminar la cabeza de clasificación
+    base_model._fc = nn.Identity()
+    
+    # Crear una capa lineal para reducir la dimensión de salida
+    cnn_model = nn.Sequential(
+        base_model,
+        nn.Linear(1280, 512)  # Reducir la dimensión de 1280 a 512
+    )
+    
+    return cnn_model
+
+
+# Bloque Encoder del Transformer
+class TransformerEncoderBlock(nn.Module):
+    def __init__(self, embed_dim, dense_dim, num_heads, dropout=0.3):
+        super(TransformerEncoderBlock, self).__init__()
+        self.attention = nn.MultiheadAttention(embed_dim, num_heads)
+        self.layer_norm1 = nn.LayerNorm(embed_dim)
+        self.layer_norm2 = nn.LayerNorm(embed_dim)
+        self.fc = nn.Sequential(
+            nn.Linear(embed_dim, dense_dim),
+            nn.ReLU(),
+            Dropout(dropout),  # Aplicar Dropout aquí
+            nn.Linear(dense_dim, embed_dim),
+            Dropout(dropout)   # Dropout adicional
+        )
+        self.dropout = Dropout(dropout)  # Dropout en atención
 
     def forward(self, x):
-        seq_len = x.size(1)
-        return x + self.positional_embeddings[:seq_len, :].unsqueeze(0)
+        x = x.permute(1, 0, 2)  # [seq_len, batch_size, embed_dim]
+        attn_out, _ = self.attention(x, x, x)
+        x = self.layer_norm1(x + self.dropout(attn_out))
+        fc_out = self.fc(x)
+        x = self.layer_norm2(x + fc_out)
+        return x
 
-# Transformer Encoder
-class TransformerEncoder(nn.Module):
-    def __init__(self, embed_dim, num_heads, dense_dim, num_layers):
-        super(TransformerEncoder, self).__init__()
-        self.layers = nn.ModuleList([
-            nn.TransformerEncoderLayer(
-                d_model=embed_dim, nhead=num_heads, dim_feedforward=dense_dim, dropout=0.1, batch_first=True
-            ) for _ in range(num_layers)
-        ])
-        self.norm = nn.LayerNorm(embed_dim)
+# Bloque Decoder del Transformer
+# En el bloque Decoder
+class TransformerDecoderBlock(nn.Module):
+    def __init__(self, embed_dim, ff_dim, num_heads, dropout=0.3):
+        super(TransformerDecoderBlock, self).__init__()
+        self.attention = nn.MultiheadAttention(embed_dim, num_heads)
+        self.cross_attention = nn.MultiheadAttention(embed_dim, num_heads)
+        self.layer_norm1 = nn.LayerNorm(embed_dim)
+        self.layer_norm2 = nn.LayerNorm(embed_dim)
+        self.layer_norm3 = nn.LayerNorm(embed_dim)
+        self.fc = nn.Sequential(
+            nn.Linear(embed_dim, ff_dim),
+            nn.ReLU(),
+            Dropout(dropout),
+            nn.Linear(ff_dim, embed_dim),
+            Dropout(dropout)
+        )
+        self.output_fc = nn.Linear(embed_dim, d.NUM_CHAR)
+        self.dropout = Dropout(dropout)
 
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return self.norm(x)
+    def forward(self, x, encoder_out):
+        encoder_out = encoder_out.repeat(x.size(0), x.size(1), 1)
+        cross_attn_out, _ = self.cross_attention(x, encoder_out, encoder_out)
+        x = self.layer_norm2(x + self.dropout(cross_attn_out))
+        fc_out = self.fc(x)
+        x = self.layer_norm3(x + fc_out)
+        logits = self.output_fc(x)
+        return logits
 
-# Transformer Decoder
-class TransformerDecoder(nn.Module):
-    def __init__(self, embed_dim, num_heads, dense_dim, vocab_size, num_layers, max_seq_len=50):
-        super(TransformerDecoder, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.positional_embedding = PositionalEmbedding(sequence_length=max_seq_len, embed_dim=embed_dim)
-        self.layers = nn.ModuleList([
-            nn.TransformerDecoderLayer(
-                d_model=embed_dim, nhead=num_heads, dim_feedforward=dense_dim, dropout=0.1, batch_first=True
-            ) for _ in range(num_layers)
-        ])
-        self.fc_out = nn.Linear(embed_dim, vocab_size)
-        self.norm = nn.LayerNorm(embed_dim)
+# Modelo completo de Image Captioning
+class ImageCaptioningModel(nn.Module):
+    def __init__(self, cnn_model, encoder, decoder, num_captions_per_image=5, embed_dim=512):
+        super(ImageCaptioningModel, self).__init__()
+        self.cnn_model = cnn_model
+        self.encoder = encoder
+        self.decoder = decoder
+        self.num_captions_per_image = num_captions_per_image
+        self.caption_embedding = nn.Embedding(d.NUM_CHAR, embed_dim)  # Agregar esta línea para embellecer los captions
+        
+    # Modificar la extracción de características en la función forward del ImageCaptioningModel
+    def forward(self, images, captions):
+        # Extraer características de la imagen
+        img_embed = self.cnn_model(images)  # [batch_size, embed_dim]
 
-    def forward(self, inputs, targets, tgt_mask=None, memory_mask=None):
-        # Asegurarse de que los índices sean de tipo LongTensor
-        inputs = inputs.long()
-        targets = targets.long()
+        # Ajustar la forma para que sea compatible con el encoder
+        img_embed = img_embed.unsqueeze(1)  # [batch_size, 1, embed_dim]
+        img_embed = img_embed.permute(1, 0, 2)  # [1, batch_size, embed_dim]
 
-        input_embedded = self.embedding(inputs)
-        input_embedded = self.positional_embedding(input_embedded)
-        memory = self.encoder(input_embedded)
-        outputs = self.decoder(targets, memory, tgt_mask=tgt_mask, memory_mask=memory_mask)
-        return outputs
+        # Pasar por el encoder
+        encoder_out = self.encoder(img_embed)  # [1, batch_size, embed_dim]
+
+        
+        # Embedding de los captions antes de pasarlos al decoder
+        caption_embeds = self.caption_embedding(captions)
+        
+        # Pasar las características por el decoder
+        decoder_out = self.decoder(caption_embeds.permute(1, 0, 2), encoder_out)
+        decoder_out = decoder_out.permute(1, 0, 2)
+
+        
+        return decoder_out
+
+# Función principal para definir y entrenar el modelo
+def train_image_captioning_model(train_loader, val_loader, device, lr):
+    # Crear directorio para guardar gráficas y el modelo si no existen
+    if not os.path.exists('results'):
+        os.makedirs('results')
+    
+    EMBED_DIM = 512
+    FF_DIM = 512
+    EPOCHS = 30  # Increased from 15 to 30
+
+    # Cargar el modelo CNN
+    cnn_model = get_cnn_model()
+
+    # Mover el modelo EfficientNet a la GPU si está disponible
+    cnn_model.to(device)  # Asegúrate de mover el modelo a la misma GPU que las imágenes
 
 
-# Transformer Model
-class TransformerCharacterLevel(nn.Module):
-    def __init__(self, embed_dim, num_heads, dense_dim, vocab_size, num_layers=2, max_seq_len=50):
-        super(TransformerCharacterLevel, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.positional_embedding = PositionalEmbedding(sequence_length=max_seq_len, embed_dim=embed_dim)
-        self.encoder = TransformerEncoder(embed_dim, num_heads, dense_dim, num_layers)
-        self.decoder = TransformerDecoder(embed_dim, num_heads, dense_dim, vocab_size, num_layers, max_seq_len)
+    # Definir los bloques del Transformer
+    encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=2)
+    decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=4)
 
-    def forward(self, inputs, targets, tgt_mask=None, memory_mask=None):
-        input_embedded = self.embedding(inputs)
-        input_embedded = self.positional_embedding(input_embedded)
-        memory = self.encoder(input_embedded)
-        outputs = self.decoder(targets, memory, tgt_mask=tgt_mask, memory_mask=memory_mask)
-        return outputs
+    # Crear el modelo de captioning
+    caption_model = ImageCaptioningModel(cnn_model=cnn_model, encoder=encoder, decoder=decoder)
+    caption_model.to(device)
 
-# Training and Evaluation Functions
-def train_model(model, name, train_loader, val_loader, vocab, num_epochs=20, learning_rate=1e-3):
-    criterion = CrossEntropyLoss(ignore_index=vocab.char2idx['<PAD>'])
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # Increment learning rate
+    lr = lr * 2  # Doubled the learning rate
+
+    # Configurar el optimizador
+    optimizer = optim.AdamW(caption_model.parameters(), lr=lr)
+
+    # Configurar EarlyStopping para evitar sobreajuste
+    early_stopping = EarlyStopping(monitor='val_loss', patience=5, verbose=True)  # Adjusted patience for the longer epochs
+
+    # Variables para almacenar métricas
     train_losses = []
+    train_accuracies = []
     val_losses = []
+    val_accuracies = []
 
-    for epoch in range(num_epochs):
-        model.train()
+    # Variables para almacenar métricas
+    train_bleu_scores = {"bleu_1": [], "bleu_2": [], "bleu_3": [], "bleu_4": []}
+    val_bleu_scores = {"bleu_1": [], "bleu_2": [], "bleu_3": [], "bleu_4": []}
+
+    # Entrenamiento del modelo
+    for epoch in range(EPOCHS):
+        caption_model.train()
         total_loss = 0
-        for inputs, targets in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
-            inputs, targets = inputs.to(device), targets.to(device)
+        total_acc = 0
+        padding_idx = vocab['<PAD>']
+        char2idx = dataset.vocab.char2idx
+        idx2char = dataset.vocab.idx2char
 
-            outputs = model(inputs, targets[:, :-1])
-            loss = criterion(outputs.view(-1, len(vocab.char2idx)), targets[:, 1:].contiguous().view(-1))
+        total_bleu_scores = {key: 0 for key in train_bleu_scores}
+
+        for images, captions in train_loader:  # Usar el dataloader de entrenamiento
+            images, captions = images.to(device), captions.to(device)
             
             optimizer.zero_grad()
+            
+            # Pasar las imágenes y los captions por el modelo
+            predictions = caption_model(images, captions)
+    
+            
+            # Calcular la pérdida
+            loss = d.compute_loss(predictions[:, :-1], captions[:, 1:], padding_idx)  # Eliminar la última predicción
+
             loss.backward()
             optimizer.step()
+            
+            # Calcular la exactitud
+            acc = d.compute_accuracy(predictions, captions[:, 1:])
+            
+            bleu_scores = d.compute_bleu(predictions, captions[:, 1:], idx2char, char2idx)
+            for key in train_bleu_scores:
+                total_bleu_scores[key] += bleu_scores[key]
+
             total_loss += loss.item()
-
-        avg_train_loss = total_loss / len(train_loader)
-        train_losses.append(avg_train_loss)
-
-        val_loss = evaluate_model(model, val_loader, vocab, criterion)
-        val_losses.append(val_loss)
+            total_acc += acc
         
-        print(f"Epoch [{epoch+1}/{num_epochs}] | Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}")
-        save_model(model, r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\{name}_epoch_{epoch+1}.pth")
+        # Promediar las métricas para la época
+        avg_train_loss = total_loss / len(train_loader)
+        avg_train_acc = total_acc / len(train_loader)
 
-    plot_training(train_losses, val_losses, r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\{name}_training_plot.png")
+        avg_bleu_scores = {key: total / len(train_loader) for key, total in total_bleu_scores.items()}
+        for key in train_bleu_scores:
+            train_bleu_scores[key].append(avg_bleu_scores[key])
+        
+        # Evaluación con el val_loader al final de cada época
+        caption_model.eval()
+        total_val_bleu_scores = {key: 0 for key in val_bleu_scores}
 
-def evaluate_model(model, data_loader, vocab, criterion):
-    model.eval()
-    total_loss = 0
-    with torch.no_grad():
-        for inputs, targets in data_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs, targets[:, :-1])
-            loss = criterion(outputs.view(-1, len(vocab.char2idx)), targets[:, 1:].contiguous().view(-1))
-            total_loss += loss.item()
-    return total_loss / len(data_loader)
+        total_val_loss = 0
+        total_val_acc = 0
+        with torch.no_grad():
+            for images, captions in val_loader:  # Usar el dataloader de validación
+                images, captions = images.to(device), captions.to(device)
+                
+                predictions = caption_model(images, captions)
 
-def save_model(model, path):
-    torch.save(model.state_dict(), path)
-    print(f"Model saved to {path}")
+                val_loss = d.compute_loss(predictions[:, :-1], captions[:, 1:], padding_idx)  # Eliminar la última predicción
+                val_acc = d.compute_accuracy(predictions, captions[:, 1:])
+                
+                val_bleu_scores_epoch = d.compute_bleu(predictions, captions[:, 1:], idx2char, char2idx)
+                for key in val_bleu_scores:
+                    total_val_bleu_scores[key] += val_bleu_scores_epoch[key]
+                
+                total_val_loss += val_loss.item()
+                total_val_acc += val_acc
+        
+        # Promediar las métricas para la época
+        avg_val_loss = total_val_loss / len(val_loader)
+        avg_val_acc = total_val_acc / len(val_loader)
+        
+        # Guardar las métricas
+        train_losses.append(avg_train_loss)
+        train_accuracies.append(avg_train_acc)
+        val_losses.append(avg_val_loss)
+        val_accuracies.append(avg_val_acc)
 
-def plot_training(train_losses, val_losses, save_path):
-    plt.figure(figsize=(8, 6))
-    plt.plot(train_losses, label='Training Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
-    plt.savefig(save_path)
-    print(f"Training plot saved to {save_path}")
+        avg_val_bleu_scores = {key: total / len(val_loader) for key, total in total_val_bleu_scores.items()}
+        for key in val_bleu_scores:
+            val_bleu_scores[key].append(avg_val_bleu_scores[key])
+        
+        # Imprimir el progreso por cada época
+        print(f"Epoch {epoch+1}/{EPOCHS}, "
+              f"Train Loss: {avg_train_loss:.4f}, Train Accuracy: {avg_train_acc:.4f}, "
+              f"BLEU-1: {avg_bleu_scores['bleu_1']:.4f}, BLEU-2: {avg_bleu_scores['bleu_2']:.4f}, BLEU-3: {avg_bleu_scores['bleu_3']:.4f}, BLEU-4: {avg_bleu_scores['bleu_4']:.4f}, "
+            
+              f"Val Loss: {avg_val_loss:.4f}, Val Accuracy: {avg_val_acc:.4f}, "
+              f"Validation BLEU-1: {avg_val_bleu_scores['bleu_1']:.4f}, BLEU-2: {avg_val_bleu_scores['bleu_2']:.4f}, BLEU-3: {avg_val_bleu_scores['bleu_3']:.4f}, BLEU-4: {avg_val_bleu_scores['bleu_4']:.4f}, ")
 
-if __name__ == "__main__":
-    import datachar as d
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    embed_size = 256
-    num_heads = 8
-    dense_dim = 512
-    num_layers = 6
-    max_seq_len = 50
-    vocab_size = len(d.train_dataset.vocab.char2idx)
+    # Guardar el modelo entrenado
+    torch.save(caption_model.state_dict(), 'results/image_captioning_model.pth')
+    print("Model saved!")
 
-    model = TransformerCharacterLevel(
-        embed_dim=embed_size, num_heads=num_heads, dense_dim=dense_dim, vocab_size=vocab_size, num_layers=num_layers, max_seq_len=max_seq_len
-    ).to(device)
+    # Graficar y guardar las métricas al final del entrenamiento
+    d.plot_metrics(train_losses, train_accuracies, val_losses, val_accuracies, 
+                   train_bleu_scores['bleu_1'], train_bleu_scores['bleu_2'], 
+                   train_bleu_scores['bleu_3'], train_bleu_scores['bleu_4'])
 
-    train_model(model, "transformer_captioning", d.train_loader, d.val_loader, d.train_dataset.vocab, num_epochs=15, learning_rate=1e-4)
+# Llamar a la función de entrenamiento
+if __name__ == '__main__':
+    # Create the dataset
+    dataset = d.FoodImageCaptionDataset(csv_path=d.csv_path, image_dir=d.image_dir, transform=d.image_transforms)
+    vocab = dataset.vocab.char2idx
+
+    # Dividir el índice de datos
+    train_indices, val_indices = train_test_split(range(len(dataset)), test_size=0.2, random_state=42)
+    val_indices, test_indices = train_test_split(val_indices, test_size=0.5, random_state=42)
+
+    # Crear subconjuntos para entrenamiento, validación y prueba
+    train_subset = d.SubsetFoodImageCaptionDataset(dataset, train_indices)
+    val_subset = d.SubsetFoodImageCaptionDataset(dataset, val_indices)
+    test_subset = d.SubsetFoodImageCaptionDataset(dataset, test_indices)
+
+    # Crear los dataloaders
+    train_loader = d.DataLoader(train_subset, batch_size=8, shuffle=True, collate_fn=d.collate_fn)
+    val_loader = d.DataLoader(val_subset, batch_size=8, shuffle=False, collate_fn=d.collate_fn)
+    test_loader = d.DataLoader(test_subset, batch_size=8, shuffle=False, collate_fn=d.collate_fn)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    train_image_captioning_model(train_loader,val_loader,device, 1e-2)
