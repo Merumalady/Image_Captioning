@@ -7,7 +7,7 @@ from torch.nn import Dropout
 import os
 from sklearn.model_selection import train_test_split
 from efficientnet_pytorch import EfficientNet
-from keras.callbacks import EarlyStopping
+import torch.nn.functional as F
 
 # Definir el modelo CNN basado en EfficientNet
 def get_cnn_model():
@@ -26,90 +26,117 @@ def get_cnn_model():
     return cnn_model
 
 
-# Bloque Encoder del Transformer
 class TransformerEncoderBlock(nn.Module):
     def __init__(self, embed_dim, dense_dim, num_heads, dropout=0.3):
         super(TransformerEncoderBlock, self).__init__()
         self.attention = nn.MultiheadAttention(embed_dim, num_heads)
         self.layer_norm1 = nn.LayerNorm(embed_dim)
         self.layer_norm2 = nn.LayerNorm(embed_dim)
+        
         self.fc = nn.Sequential(
             nn.Linear(embed_dim, dense_dim),
             nn.ReLU(),
-            Dropout(dropout),  # Aplicar Dropout aquí
+            nn.Dropout(dropout),  # Aplicar Dropout aquí
+            nn.BatchNorm1d(dense_dim),  # Aquí usamos BatchNorm1d para normalizar las características
             nn.Linear(dense_dim, embed_dim),
-            Dropout(dropout)   # Dropout adicional
+            nn.Dropout(dropout)   # Dropout adicional
         )
-        self.dropout = Dropout(dropout)  # Dropout en atención
+        self.dropout = nn.Dropout(dropout)  # Dropout en atención
 
     def forward(self, x):
-        x = x.permute(1, 0, 2)  # [seq_len, batch_size, embed_dim]
+        # Cambiar la forma del tensor de [seq_len, batch_size, embed_dim] a [seq_len, batch_size, embed_dim]
+        x = x.permute(1, 0, 2)  # [batch_size, seq_len, embed_dim]
+        
         attn_out, _ = self.attention(x, x, x)
+        
+        # Añadir el resultado de la atención al tensor de entrada y aplicar la capa de normalización
         x = self.layer_norm1(x + self.dropout(attn_out))
-        fc_out = self.fc(x)
+        
+        # Aplanar el tensor para que BatchNorm1d reciba un tensor de forma [batch_size * seq_len, embed_dim]
+        x_flattened = x.view(-1, x.size(-1))  # Aplanar [batch_size * seq_len, embed_dim]
+        
+        fc_out = self.fc(x_flattened)  # Pasar el tensor a través de las capas completamente conectadas
+        
+        # Volver a darle la forma original de [batch_size, seq_len, embed_dim]
+        x = fc_out.view(x.size(0), x.size(1), -1)
+        
+        # Aplicar la segunda capa de normalización
         x = self.layer_norm2(x + fc_out)
+        
         return x
 
-# Bloque Decoder del Transformer
-# En el bloque Decoder
-class TransformerDecoderBlock(nn.Module):
-    def __init__(self, embed_dim, ff_dim, num_heads, dropout=0.3):
-        super(TransformerDecoderBlock, self).__init__()
-        self.attention = nn.MultiheadAttention(embed_dim, num_heads)
-        self.cross_attention = nn.MultiheadAttention(embed_dim, num_heads)
-        self.layer_norm1 = nn.LayerNorm(embed_dim)
-        self.layer_norm2 = nn.LayerNorm(embed_dim)
-        self.layer_norm3 = nn.LayerNorm(embed_dim)
+#BAHDANAU ATTENTION
+class Attention(nn.Module):
+    def __init__(self, encoder_dim, decoder_dim, attention_dim):
+        super(Attention, self).__init__()
+        self.W = nn.Linear(decoder_dim, attention_dim)
+        self.U = nn.Linear(encoder_dim, attention_dim)
+        self.A = nn.Linear(attention_dim, 1)
+
+    def forward(self, features, hidden_state):
+        u_hs = self.U(features)
+        w_ah = self.W(hidden_state).unsqueeze(1)
+        combined_states = torch.tanh(u_hs + w_ah)
+        attention_scores = self.A(combined_states).squeeze(2)
+        alpha = F.softmax(attention_scores, dim=1)
+        attention_weights = features * alpha.unsqueeze(2)
+        context = attention_weights.sum(dim=1)
+        return alpha, context
+
+        
+
+class BahdanauDecoder(nn.Module):
+    def __init__(self, embed_dim, encoder_dim, decoder_dim, attention_dim, vocab_size, dropout=0.3):
+        super(BahdanauDecoder, self).__init__()
+        self.attention = Attention(encoder_dim, decoder_dim, attention_dim)
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.lstm = nn.LSTMCell(embed_dim + encoder_dim, decoder_dim)
+        #self.fc = nn.Linear(decoder_dim, vocab_size)
         self.fc = nn.Sequential(
-            nn.Linear(embed_dim, ff_dim),
-            nn.ReLU(),
-            Dropout(dropout),
-            nn.Linear(ff_dim, embed_dim),
-            Dropout(dropout)
+            nn.Linear(decoder_dim, vocab_size),
+            nn.BatchNorm1d(vocab_size)  # Añadir BatchNorm
         )
-        self.output_fc = nn.Linear(embed_dim, vocab_size)
-        self.dropout = Dropout(dropout)
+        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, encoder_out):
-        encoder_out = encoder_out.repeat(x.size(0), x.size(1), 1)
-        cross_attn_out, _ = self.cross_attention(x, encoder_out, encoder_out)
-        x = self.layer_norm2(x + self.dropout(cross_attn_out))
-        fc_out = self.fc(x)
-        x = self.layer_norm3(x + fc_out)
-        logits = self.output_fc(x)
-        return logits
+    def forward(self, captions, encoder_out):
+        batch_size = captions.size(0)
+        hidden_state, cell_state = self.init_hidden_state(batch_size, encoder_out.size(-1))
 
-# Modelo completo de Image Captioning
+        outputs = []
+        for t in range(captions.size(1)):
+            embeddings = self.embedding(captions[:, t])
+            alpha, context = self.attention(encoder_out, hidden_state)
+            lstm_input = torch.cat((embeddings, context), dim=1)
+            hidden_state, cell_state = self.lstm(lstm_input, (hidden_state, cell_state))
+            output = self.fc(self.dropout(hidden_state))
+            outputs.append(output.unsqueeze(1))
+        
+        outputs = torch.cat(outputs, dim=1)
+        return outputs
+
+    def init_hidden_state(self, batch_size, encoder_dim):
+        hidden_state = torch.zeros(batch_size, encoder_dim).to(next(self.parameters()).device)
+        cell_state = torch.zeros(batch_size, encoder_dim).to(next(self.parameters()).device)
+        return hidden_state, cell_state
+
+    
 class ImageCaptioningModel(nn.Module):
-    def __init__(self, cnn_model, encoder, decoder, num_captions_per_image=5, embed_dim=512):
+    def __init__(self, cnn_model, encoder, decoder):
         super(ImageCaptioningModel, self).__init__()
         self.cnn_model = cnn_model
         self.encoder = encoder
         self.decoder = decoder
-        self.num_captions_per_image = num_captions_per_image
-        self.caption_embedding = nn.Embedding(vocab_size, embed_dim)  # Agregar esta línea para embellecer los captions
-        
-    # Modificar la extracción de características en la función forward del ImageCaptioningModel
+
     def forward(self, images, captions):
         # Extraer características de la imagen
-        img_embed = self.cnn_model(images)  # [batch_size, embed_dim]
-
-        # Ajustar la forma para que sea compatible con el encoder
-        img_embed = img_embed.unsqueeze(1)  # [batch_size, 1, embed_dim]
-        img_embed = img_embed.permute(1, 0, 2)  # [1, batch_size, embed_dim]
-
-        # Pasar por el encoder
-        encoder_out = self.encoder(img_embed)  # [1, batch_size, embed_dim]
-
+        img_features = self.cnn_model(images)  # [batch_size, 512]
         
-        # Embedding de los captions antes de pasarlos al decoder
-        caption_embeds = self.caption_embedding(captions)
+        # Reestructurar para ser compatible con el encoder
+        img_features = img_features.unsqueeze(1)  # [batch_size, 1, 512]
+        encoder_out = self.encoder(img_features)  # [batch_size, 1, 512]
         
-        # Pasar las características por el decoder
-        decoder_out = self.decoder(caption_embeds.permute(1, 0, 2), encoder_out)
-        decoder_out = decoder_out.permute(1, 0, 2)
-
-        
+        # Decodificar con atención
+        decoder_out = self.decoder(captions, encoder_out)
         return decoder_out
 
 # Función para preprocesar y cargar una imagen aleatoria
@@ -176,7 +203,7 @@ def show_image(image_tensor, caption, idx2word):
     plt.axis('off')
     plt.show()
 
-"""
+
 import torch
 import os
 import matplotlib.pyplot as plt
@@ -233,7 +260,7 @@ def evaluate_models_in_folder(models_folder, dataloader, device, idx2word, vocab
     results = {}
 
     for model_file in os.listdir(models_folder):
-        model = ImageCaptioningModel(cnn_model=cnn_model, encoder=encoder, decoder=decoder)
+        model = ImageCaptioningModel(cnn_model, encoder, decoder).to(device)
         
         if model_file.endswith(".pth"):
 
@@ -264,7 +291,7 @@ def plot_results(results, model_name):
     plt.xticks(rotation=0, ha='right')
     plt.title("Test Accuracy per Model")
     plt.legend()
-    plt.savefig(f"without_bahdnau_test_accuracy_plot.png")
+    plt.savefig(f"bahdnau_test_accuracy_plot_0.5.png")
     plt.close()
 
     # Gráfico de métricas BLEU, ROUGE y METEOR
@@ -278,55 +305,18 @@ def plot_results(results, model_name):
     plt.xticks(rotation=0, ha='right')
     plt.title("BLEU, ROUGE per Model")
     plt.legend()
-    plt.savefig(f"without_bahdnau_test_metrics_plot.png")
+    plt.savefig(f"bahdnau_test_metrics_plot_0.5.png")
     plt.close()
-"""
 
-
-    # Variables necesarias
-    #models_folder = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\models"
-"""
-    dataloader = test_loader  # Reemplaza con tu DataLoader de prueba
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    idx2word = dataset.vocab.idx2word  # Diccionario índice a palabra
-    vocab = dataset.vocab.word2idx  # Diccionario palabra a índice
-    padding_idx = vocab["<PAD>"]
-    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=padding_idx)
-
-    # Dividir el índice de datos
-    train_indices, val_indices = train_test_split(range(len(dataset)), test_size=0.2, random_state=42)
-    val_indices, test_indices = train_test_split(val_indices, test_size=0.5, random_state=42)
-
-    test_subset = d.SubsetFoodImageCaptionDataset(dataset, test_indices)
-    test_loader = d.DataLoader(test_subset, batch_size=12, shuffle=False, collate_fn=d.collate_fn)
-
-    EMBED_DIM = 512
-    FF_DIM = 512
-
-    # Cargar el modelo CNN
-    cnn_model = get_cnn_model()
-
-    # Mover el modelo EfficientNet a la GPU si está disponible
-    cnn_model.to(device)  # Asegúrate de mover el modelo a la misma GPU que las imágenes
-
-
-    # Definir los bloques del Transformer
-    encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=8)
-    decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=8)
-
-    evaluate_models_in_folder(models_folder, dataloader, device, idx2word, vocab, padding_idx, loss_fn)
-"""
 
 if __name__ == "__main__":
+
     import data as d  # Assuming data.py contains your dataset and vocab loaders
     import random
     # Create the dataset
     dataset = d.FoodImageCaptionDataset(csv_path=d.csv_path, image_dir=d.image_dir, transform=d.image_transforms)
     vocab_size = len(dataset.vocab.word2idx)
     vocab = dataset.vocab.word2idx  # Diccionario palabra a índice
-
-    EMBED_DIM = 512
-    FF_DIM = 512
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -336,15 +326,14 @@ if __name__ == "__main__":
     # Mover el modelo EfficientNet a la GPU si está disponible
     cnn_model.to(device)
 
-    encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=8)
-    decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=8)
-
+    encoder = TransformerEncoderBlock(embed_dim=512, dense_dim=512, num_heads=8, dropout= 0.5)
+    decoder = BahdanauDecoder(embed_dim=512, encoder_dim=512, decoder_dim=512, attention_dim=256, vocab_size=len(vocab), dropout= 0.5)
 
     # Ruta de la carpeta donde están los modelos
-    models_folder = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\models"
-    image_folder = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\food_test"
+    models_folder = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\models_bahdnau_0.5"
+    #image_folder = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\food_test"
     
-    # Transform to be applied to each image (as defined in d.image_transforms)
+    """# Transform to be applied to each image (as defined in d.image_transforms)
     transform = d.image_transforms  # Ensure you have this transform defined correctly in your 'data.py'
 
     # Iterate through all image files in the directory
@@ -369,6 +358,23 @@ if __name__ == "__main__":
                     print(f"Generated Caption for {model_file}: ", " ".join(generated_caption))
 
                     # Display the image and caption
-                    show_image(Image.open(image_path), generated_caption, dataset.vocab.idx2word)
+                    show_image(Image.open(image_path), generated_caption, dataset.vocab.idx2word)"""
 
+
+    #Variables necesarias
+    train_indices, val_indices = train_test_split(range(len(dataset)), test_size=0.2, random_state=42)
+    val_indices, test_indices = train_test_split(val_indices, test_size=0.5, random_state=42)
+
+    test_subset = d.SubsetFoodImageCaptionDataset(dataset, test_indices)
+    test_loader = d.DataLoader(test_subset, batch_size=12, shuffle=False, collate_fn=d.collate_fn)
+
+  
+    dataloader = test_loader  # Reemplaza con tu DataLoader de prueba
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    idx2word = dataset.vocab.idx2word  # Diccionario índice a palabra
+    vocab = dataset.vocab.word2idx  # Diccionario palabra a índice
+    padding_idx = vocab["<PAD>"]
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=padding_idx)
+
+    evaluate_models_in_folder(models_folder, dataloader, device, idx2word, vocab, padding_idx, loss_fn)
 

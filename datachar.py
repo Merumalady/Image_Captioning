@@ -194,7 +194,7 @@ def plot_metrics(train_losses, train_accuracies, val_losses, val_accuracies, ble
     plt.ylabel('Accuracy')
     plt.legend()
     plt.tight_layout()
-    plt.savefig('results/loss_accuracy.png')
+    plt.savefig('results/loss_accuracy_language.png')
     plt.close()
 
     # Gráficos de BLEU
@@ -227,7 +227,7 @@ def plot_metrics(train_losses, train_accuracies, val_losses, val_accuracies, ble
     plt.ylabel('BLEU-4')
     plt.legend()
     plt.tight_layout()
-    plt.savefig('results/bleu_scores.png')
+    plt.savefig('results/bleu_scores_language.png')
     plt.close()
 
 # Función de cálculo de pérdida

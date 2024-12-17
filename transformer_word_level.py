@@ -6,8 +6,6 @@ import os
 from sklearn.model_selection import train_test_split
 from efficientnet_pytorch import EfficientNet
 from keras.callbacks import EarlyStopping
-from tensorflow.keras.optimizers import Adam
-import datachar as d  # Asegúrate de que este módulo esté disponible
 
 # Definir el modelo CNN basado en EfficientNet
 def get_cnn_model():
@@ -50,6 +48,7 @@ class TransformerEncoderBlock(nn.Module):
         x = self.layer_norm2(x + fc_out)
         return x
 
+
 # Bloque Decoder del Transformer
 # En el bloque Decoder
 class TransformerDecoderBlock(nn.Module):
@@ -67,7 +66,7 @@ class TransformerDecoderBlock(nn.Module):
             nn.Linear(ff_dim, embed_dim),
             Dropout(dropout)
         )
-        self.output_fc = nn.Linear(embed_dim, d.NUM_CHAR)
+        self.output_fc = nn.Linear(embed_dim, vocab_size)
         self.dropout = Dropout(dropout)
 
     def forward(self, x, encoder_out):
@@ -87,7 +86,7 @@ class ImageCaptioningModel(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
         self.num_captions_per_image = num_captions_per_image
-        self.caption_embedding = nn.Embedding(d.NUM_CHAR, embed_dim)  # Agregar esta línea para embellecer los captions
+        self.caption_embedding = nn.Embedding(vocab_size, embed_dim)  # Agregar esta línea para embellecer los captions
         
     # Modificar la extracción de características en la función forward del ImageCaptioningModel
     def forward(self, images, captions):
@@ -113,14 +112,13 @@ class ImageCaptioningModel(nn.Module):
         return decoder_out
 
 # Función principal para definir y entrenar el modelo
-def train_image_captioning_model(train_loader,val_loader,device, lr):
+def train_image_captioning_model(train_loader,val_loader,device, vocab, EPOCHS = 30 ,lr= 1e-4):
     # Crear directorio para guardar gráficas y el modelo si no existen
     if not os.path.exists('results'):
         os.makedirs('results')
     
     EMBED_DIM = 512
-    FF_DIM = 512
-    EPOCHS = 50
+    FF_DIM = 2048
 
     # Cargar el modelo CNN
     cnn_model = get_cnn_model()
@@ -130,8 +128,8 @@ def train_image_captioning_model(train_loader,val_loader,device, lr):
 
 
     # Definir los bloques del Transformer
-    encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=2)
-    decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=4)
+    encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=8)
+    decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=8)
 
     # Crear el modelo de captioning
     caption_model = ImageCaptioningModel(cnn_model=cnn_model, encoder=encoder, decoder=decoder)
@@ -158,13 +156,13 @@ def train_image_captioning_model(train_loader,val_loader,device, lr):
         caption_model.train()
         total_loss = 0
         total_acc = 0
-        padding_idx = vocab['<PAD>']
-        char2idx = dataset.vocab.char2idx
-        idx2char = dataset.vocab.idx2char
+        padding_idx = vocab["<PAD>"]
+        char2idx = dataset.vocab.word2idx
+        idx2char = dataset.vocab.idx2word
 
         total_bleu_scores = {key: 0 for key in train_bleu_scores}
 
-        for images, captions in train_loader:  # Usar el dataloader de entrenamiento
+        for batch_idx, (images, captions) in enumerate(train_loader):  # Usar el dataloader de entrenamiento
             images, captions = images.to(device), captions.to(device)
             
             optimizer.zero_grad()
@@ -172,7 +170,6 @@ def train_image_captioning_model(train_loader,val_loader,device, lr):
             # Pasar las imágenes y los captions por el modelo
             predictions = caption_model(images, captions)
     
-            
             # Calcular la pérdida
             #print(f"Predictions shape: {predictions.shape}")
             #print(f"Targets shape: {captions[:, 1:].shape}")
@@ -183,7 +180,7 @@ def train_image_captioning_model(train_loader,val_loader,device, lr):
             optimizer.step()
             
             # Calcular la exactitud
-            acc = d.compute_accuracy(predictions, captions[:, 1:])
+            acc = d.compute_accuracy(predictions, captions[:, 1:], padding_idx)
             
             bleu_scores = d.compute_bleu(predictions, captions[:, 1:], idx2char, char2idx)
             for key in train_bleu_scores:
@@ -207,13 +204,13 @@ def train_image_captioning_model(train_loader,val_loader,device, lr):
         total_val_loss = 0
         total_val_acc = 0
         with torch.no_grad():
-            for images, captions in val_loader:  # Usar el dataloader de validación
+            for batch_idx, (images, captions) in enumerate(val_loader):  # Usar el dataloader de validación
                 images, captions = images.to(device), captions.to(device)
                 
                 predictions = caption_model(images, captions)
 
                 val_loss = d.compute_loss(predictions[:, :-1], captions[:, 1:], padding_idx)  # Eliminar la última predicción
-                val_acc = d.compute_accuracy(predictions, captions[:, 1:])
+                val_acc = d.compute_accuracy(predictions, captions[:, 1:], padding_idx)
                 
                 val_bleu_scores_epoch = d.compute_bleu(predictions, captions[:, 1:], idx2char, char2idx)
                 for key in val_bleu_scores:
@@ -242,22 +239,22 @@ def train_image_captioning_model(train_loader,val_loader,device, lr):
               f"BLEU-1: {avg_bleu_scores['bleu_1']:.4f}, BLEU-2: {avg_bleu_scores['bleu_2']:.4f}, BLEU-3: {avg_bleu_scores['bleu_3']:.4f}, BLEU-4: {avg_bleu_scores['bleu_4']:.4f}, "
             
               f"Val Loss: {avg_val_loss:.4f}, Val Accuracy: {avg_val_acc:.4f}, "
-              f"Validation BLEU-1: {avg_val_bleu_scores['bleu_1']:.4f}, BLEU-2: {avg_val_bleu_scores['bleu_2']:.4f}, BLEU-3: {avg_val_bleu_scores['bleu_3']:.4f}, BLEU-4: {avg_val_bleu_scores['bleu_4']:.4f}, ")
+              f"Validation BLEU-1: {avg_val_bleu_scores['bleu_1']:.4f}, BLEU-2: {avg_val_bleu_scores['bleu_2']:.4f}, BLEU-3: {avg_val_bleu_scores['bleu_3']:.4f}, BLEU-4: {avg_val_bleu_scores['bleu_4']:.4f}")
 
+    name_model = f'word_level_{EPOCHS}_{lr}_2048'
     # Guardar el modelo entrenado
-    torch.save(caption_model.state_dict(), 'results/image_captioning_model_50.pth')
+    torch.save(caption_model.state_dict(), f"results/{name_model}.pth")
     print("Model saved!")
 
     # Graficar y guardar las métricas al final del entrenamiento
-    d.plot_metrics(train_losses, train_accuracies, val_losses, val_accuracies, 
+    d.plot_metrics(name_model, train_losses, train_accuracies, val_losses, val_accuracies, 
                    train_bleu_scores['bleu_1'], train_bleu_scores['bleu_2'], 
                    train_bleu_scores['bleu_3'], train_bleu_scores['bleu_4'])
 
-# Llamar a la función de entrenamiento
-if __name__ == '__main__':
+if __name__ == "__main__":
+    import data as d  # Assuming data.py contains your dataset and vocab loaders
     # Create the dataset
     dataset = d.FoodImageCaptionDataset(csv_path=d.csv_path, image_dir=d.image_dir, transform=d.image_transforms)
-    vocab = dataset.vocab.char2idx
 
     # Dividir el índice de datos
     train_indices, val_indices = train_test_split(range(len(dataset)), test_size=0.2, random_state=42)
@@ -273,5 +270,8 @@ if __name__ == '__main__':
     val_loader = d.DataLoader(val_subset, batch_size=12, shuffle=False, collate_fn=d.collate_fn)
     test_loader = d.DataLoader(test_subset, batch_size=12, shuffle=False, collate_fn=d.collate_fn)
 
+    vocab_size = len(dataset.vocab.word2idx)
+    vocab = dataset.vocab.word2idx
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    train_image_captioning_model(train_loader,val_loader,device, 1e-4)
+    train_image_captioning_model(train_loader,val_loader,device, vocab, EPOCHS = 50 ,lr= 1e-3)

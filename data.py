@@ -17,6 +17,9 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 from torchvision import transforms
+from collections import defaultdict
+import matplotlib.pyplot as plt
+from nltk.translate.bleu_score import sentence_bleu
 
 class FoodImageCaptionDataset(Dataset):
     def __init__(self, csv_path, image_dir, transform=None, max_seq_length=10):
@@ -45,9 +48,8 @@ class FoodImageCaptionDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        print(f"Processing item {idx}/{len(self.data)}: {img_path}")
-
-    # Procesar imagen
+        #print(f"Processing item {idx}/{len(self.data)}: {self.image_dir}")
+        # Procesar imagen
         img_path = self.data.iloc[idx]['Image_Path']
         image = Image.open(img_path).convert("RGB")
         if self.transform:
@@ -152,6 +154,17 @@ class Vocabulary:
         return [self.idx2word.get(idx, self.unk_token) for idx in token_ids]
 
 
+class SubsetFoodImageCaptionDataset(Dataset):
+    def __init__(self, full_dataset, indices):
+        self.full_dataset = full_dataset
+        self.indices = indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        return self.full_dataset[self.indices[idx]]
+
 # Transformaciones de imágenes
 image_transforms = transforms.Compose([
     transforms.RandomHorizontalFlip(p=0.5),
@@ -164,14 +177,103 @@ image_transforms = transforms.Compose([
 
 # Crear el dataset
 csv_path = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\archive\Food Ingredients and Recipe Dataset with Image Name Mapping.csv"
-image_dir = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\archive/Food Images/Food Images"
+image_dir = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\archive\Food Images/Food Images"
 
-dataset = FoodImageCaptionDataset(csv_path=csv_path, image_dir=image_dir, transform=image_transforms)
 
-# Dividir datos en entrenamiento, validación y pruebas
-train_data, val_data, test_data = train_val_split(dataset, validation_size=0.1, test_size=0.1)
+"""
+---------------------------------------------------------------------------------------------------------------------------
 
-# Crear dataloaders
-train_loader = DataLoader(train_data, batch_size=8, shuffle=True, num_workers=1, collate_fn=collate_fn)
-val_loader = DataLoader(val_data, batch_size=8, shuffle=False, num_workers=1, collate_fn=collate_fn)
-test_loader = DataLoader(test_data, batch_size=8, shuffle=False, num_workers=1, collate_fn=collate_fn)
+---------------------------------------------------------------------------------------------------------------------------
+"""
+
+# Función para generar y guardar gráficas
+def plot_metrics(name_model, train_losses, train_accuracies, val_losses, val_accuracies, bleu_1_scores, bleu_2_scores, bleu_3_scores, bleu_4_scores):
+    # Gráfico de pérdidas y exactitud
+    plt.figure(figsize=(16, 6))
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.title('Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(train_accuracies, label='Train Accuracy')
+    plt.plot(val_accuracies, label='Validation Accuracy')
+    plt.title('Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f'results/loss_accuracy_{name_model}.png')
+    plt.close()
+
+    # Gráficos de BLEU
+    plt.figure(figsize=(16, 8))
+    plt.subplot(2, 2, 1)
+    plt.plot(bleu_1_scores, label='BLEU-1')
+    plt.title('BLEU-1')
+    plt.xlabel('Epoch')
+    plt.ylabel('BLEU-1')
+    plt.legend()
+
+    plt.subplot(2, 2, 2)
+    plt.plot(bleu_2_scores, label='BLEU-2')
+    plt.title('BLEU-2')
+    plt.xlabel('Epoch')
+    plt.ylabel('BLEU-2')
+    plt.legend()
+
+    plt.subplot(2, 2, 3)
+    plt.plot(bleu_3_scores, label='BLEU-3')
+    plt.title('BLEU-3')
+    plt.xlabel('Epoch')
+    plt.ylabel('BLEU-3')
+    plt.legend()
+
+    plt.subplot(2, 2, 4)
+    plt.plot(bleu_4_scores, label='BLEU-4')
+    plt.title('BLEU-4')
+    plt.xlabel('Epoch')
+    plt.ylabel('BLEU-4')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f'results/bleu_scores_{name_model}.png')
+    plt.close()
+
+
+# Función de cálculo de pérdida
+def compute_loss(predictions, targets, padding_idx):
+    # Create the mask to ignore padding indices
+    mask = (targets != padding_idx).float()
+    
+    # Compute the loss
+    loss = torch.nn.functional.cross_entropy(predictions.reshape(-1, predictions.size(-1)), targets.reshape(-1), reduction='none')
+    loss = (loss * mask.view(-1)).mean()  # Apply mask and compute mean loss
+    
+    return loss
+
+
+def compute_accuracy(predictions, targets, padding_idx):
+    # Solo se calcula la exactitud para los tokens que no son padding
+    pred_ids = predictions.argmax(dim=-1)
+    mask = (targets != padding_idx).float()
+    correct = (pred_ids[:, :-1] == targets) * mask  # Eliminar la última predicción
+    accuracy = correct.sum() / mask.sum()
+    return accuracy.item()
+    
+# Función para calcular BLEU-1 a BLEU-4
+def compute_bleu(predictions, targets, idx2word, word2idx):
+    pred_ids = predictions.argmax(dim=-1)
+    pred_tokens = [idx2word[i.item()] for i in pred_ids[0]]
+    target_tokens = [idx2word[i.item()] for i in targets[0] if i.item() != word2idx['<PAD>']]
+
+    # BLEU-1 a BLEU-4
+    bleu_scores = {
+        "bleu_1": sentence_bleu([target_tokens], pred_tokens, weights=(1, 0, 0, 0)),
+        "bleu_2": sentence_bleu([target_tokens], pred_tokens, weights=(0.5, 0.5, 0, 0)),
+        "bleu_3": sentence_bleu([target_tokens], pred_tokens, weights=(0.33, 0.33, 0.33, 0)),
+        "bleu_4": sentence_bleu([target_tokens], pred_tokens, weights=(0.25, 0.25, 0.25, 0.25))
+    }
+    return bleu_scores
