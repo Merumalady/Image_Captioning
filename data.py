@@ -51,6 +51,8 @@ class FoodImageCaptionDataset(Dataset):
         #print(f"Processing item {idx}/{len(self.data)}: {self.image_dir}")
         # Procesar imagen
         img_path = self.data.iloc[idx]['Image_Path']
+        print(f"Processing item {idx}/{len(self.data)}: {img_path}")  # Place the print after initializing img_path
+
         image = Image.open(img_path).convert("RGB")
         if self.transform:
             image = self.transform(image)
@@ -61,11 +63,6 @@ class FoodImageCaptionDataset(Dataset):
         encoded_caption = self.vocab.encode(tokens, self.max_seq_length)
 
         return image, torch.tensor(encoded_caption, dtype=torch.long)
-
-#image_dir = r"C:\Users\merit\OneDrive\Escritorio\Image_Captioning\archive\Food Images\Food Images"
-#dataset = FoodImageCaptionDataset(csv_path=r"C:\Users\merit\OneDrive\Escritorio\Image_Captioning\archive\Food Ingredients and Recipe Dataset with Image Name Mapping.csv", image_dir=image_dir)
-#image_dir = r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\archive\Food Images\Food Images"
-#dataset = FoodImageCaptionDataset(csv_path=r"C:\Users\migue\OneDrive\Escritorio\UAB INTELIGENCIA ARTIFICIAL\Tercer Any\3A\Vision and Learning\Challenge 3\Image_Captioning\archive\Food Ingredients and Recipe Dataset with Image Name Mapping.csv", image_dir=image_dir)
 
 def collate_fn(batch):
     images, captions = zip(*batch)
